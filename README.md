@@ -23,7 +23,7 @@ A Jupyter [notebook](notebooks/MixtureBestRegionSearch-NYC.ipynb) replicates the
 
 #### Graphical interface
 
-We demonstrate the entire framework using a [graphical user interface](notebooks/MBRS-Demo-App.ipynb) that exposes the full functionality and allows users to easily specify their preferences and inspect the returned top-k regions on map. Also built in Python and powered by [ipywidgets](https://github.com/jupyter-widgets/ipywidgets} for Jupyter notebooks, this interactive HTML page can be deployed using [Voila](https://voila.readthedocs.io/en/stable/using.html). This GUI is organized in three panels and offers the ability to load a dataset with geolocated entities, preprocess it, and discover mixture-based regions with user-specified parametrization.
+We demonstrate the entire framework using a [graphical user interface](notebooks/MBRS-Demo-App.ipynb) that exposes the full functionality and allows users to easily specify their preferences and inspect the returned top-k regions on map. Also built in Python and powered by [ipywidgets](https://github.com/jupyter-widgets/ipywidgets) for Jupyter notebooks, this interactive HTML page can be deployed using [Voila](https://voila.readthedocs.io/en/stable/using.html). This GUI is organized in three panels and offers the ability to load a dataset with geolocated entities, preprocess it, and discover mixture-based regions with user-specified parametrization.
 
 
 #### Acknowledgment
