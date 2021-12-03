@@ -21,8 +21,12 @@ from shapely import geometry
 from shapely.geometry import Point, Polygon, box, mapping
 from shapely.ops import cascaded_union, polygonize, unary_union
 
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.model_selection import GridSearchCV
 
-########################### READING INPUT  ################################
+
+########################### LOADING INPUT DATASET ################################
 
 def read_csv(input_file, sep=',', col_id='id', col_name='name', col_lon='lon', col_lat='lat', col_kwds='keywords', kwds_sep=';', source_crs='EPSG:4326', target_crs='EPSG:4326'):
     """Create a DataFrame from a CSV file and then convert to GeoDataFrame.
@@ -62,7 +66,7 @@ def read_csv(input_file, sep=',', col_id='id', col_name='name', col_lon='lon', c
     gdf = gdf.set_crs(source_crs)
     if target_crs != source_crs:
         gdf = gdf.to_crs(target_crs)
-        
+    
     return gdf
 
 
@@ -143,6 +147,47 @@ def get_types(gdf):
 
 
 
+def topic_modeling(gdf, label_col='id', kwds_col='kwds', num_of_topics=3, kwds_per_topic=10):
+    """Models POI entities as documents, extracts topics, and assigns topics to POI entities.
+    Args:
+         gdf (GeoDataFrame): A POI GeoDataFrame with a set of tags per POI entity.
+         label_col (string): The name of the column containing the POI identifiers (default: id).
+         kwds_col (string): The name of the column containing the keywords of each POI (default: kwds).
+         num_of_topics (int): The number of topics to extract (default: 3).
+         kwds_per_topic (int): The number of keywords to return per topic (default: 10).
+    Returns:
+          The original GeoDataFrame enhanced with a column containing the POIs-to-topics assignments.
+    """
+
+    # Create a "document" for each POI entity
+    poi_kwds = dict()
+    for index, row in gdf.iterrows():
+        poi_id, kwds = row[label_col], row[kwds_col]
+        if poi_id not in poi_kwds:
+            poi_kwds[poi_id] = ''
+        for w in kwds:
+            poi_kwds[poi_id] += w + ' '
+
+    # Vectorize the corpus
+    vectorizer = CountVectorizer()
+    corpus_vectorized = vectorizer.fit_transform(poi_kwds.values())
+
+    # Extract the topics
+    search_params = {'n_components': [num_of_topics]}
+    lda = LatentDirichletAllocation(n_jobs=-1)
+    model = GridSearchCV(lda, param_grid=search_params, n_jobs=-1, cv=3)
+    model.fit(corpus_vectorized)
+    lda_model = model.best_estimator_
+
+    # Topics per entity
+    lda_output = lda_model.transform(corpus_vectorized)
+    gdf['lda_vector'] = lda_output.tolist()
+
+    print('Assigned points to ' + str(num_of_topics) + ' types derived using LDA from column ' + kwds_col + '.')
+    
+    return gdf
+
+
 def compute_score(init, region_size, params):
     """Computes the score of a distribution.
     
@@ -171,12 +216,13 @@ def compute_score(init, region_size, params):
 
 
 
-def create_graph(gdf, eps):
+def create_graph(gdf, eps, use_lda=False):
     """Creates the spatial connectivity graph.
     
     Args:
          gdf: A GeoDataFrame containing the input points.
          eps: The spatial distance threshold for edge creation.
+         use_lda: A Boolean denoting whether categories have been derived on-the-fly using LDA.
          
     Returns:
           A NetworkX graph and an R-tree index over the points.
@@ -195,7 +241,10 @@ def create_graph(gdf, eps):
     for idx, row in gdf.iterrows():
 
         # create vertex
-        G.add_nodes_from([(idx, {'cat': [gdf.loc[idx]['kwds'][0]]})])
+        if (use_lda == True):
+            G.add_nodes_from([(idx, {'cat': gdf.loc[idx]['lda_vector']})])
+        else:
+            G.add_nodes_from([(idx, {'cat': [gdf.loc[idx]['kwds'][0]]})])
 
         # retrieve neighbors and create edges
         neighbors = list()
@@ -223,7 +272,7 @@ def create_graph(gdf, eps):
 
 
 # Creates a new GRID-based data frame with identical columns as the original dataset
-# CAUTION! Assuming that column 'cat1' contains the categories
+# CAUTION! Assuming that column 'kwds' contains the categories
 def partition_data_in_grid(gdf, cell_size):
     """Partitions a GeoDataFrame of points into a uniform grid of square cells.
     
@@ -246,7 +295,7 @@ def partition_data_in_grid(gdf, cell_size):
         prtree.insert(idx, (left, bottom, right, top))
         
     # Create a data frame for the virtual grid of square cells and keep the categories of points therein
-    df_grid = pd.DataFrame(columns=['lon','lat','kwds'])
+    df_grid = pd.DataFrame(columns=['id','lon','lat','kwds'])
     numEmptyCells = 0
     for x0 in np.arange(min_lon - cell_size/2.0, max_lon + cell_size/2.0, cell_size):
         for y0 in np.arange(min_lat - cell_size/2.0, max_lat + cell_size/2.0, cell_size):
@@ -259,7 +308,7 @@ def partition_data_in_grid(gdf, cell_size):
             if points:
                 subset = gdf.loc[gdf.index.isin(points)]
                 # Keep the centroid of each NON-EMPTY cell in the grid
-                cell = {'lon':(x0 + x1)/2, 'lat':(y0 + y1)/2, 'kwds':subset['kwds'].map(lambda x: x[0]).tolist()}
+                cell = {'id':df_grid.size, 'lon':(x0 + x1)/2, 'lat':(y0 + y1)/2, 'kwds':subset['kwds'].map(lambda x: x[0]).tolist()}
                 if not cell['kwds']:
                     numEmptyCells += 1
                     continue
@@ -269,6 +318,62 @@ def partition_data_in_grid(gdf, cell_size):
                 numEmptyCells += 1
     
     print('Created grid partitioning with ' + str(df_grid.size) + ' non-empty cells containing ' + str(len(np.concatenate(df_grid['kwds']))) + ' points ; ' + str(numEmptyCells) + ' empty cells omitted.')
+    
+    # Create a GeoDataFrame with all non-empty cell centroids
+    gdf_grid = gpd.GeoDataFrame(df_grid, geometry=gpd.points_from_xy(df_grid['lon'], df_grid['lat']))
+    gdf_grid = gdf_grid.drop(['lon', 'lat'], axis=1)
+    
+    return prtree, gdf_grid
+
+
+
+# Creates a new GRID-based data frame over the original dataset with the LDA vector derived per point 
+# CAUTION! Assuming that column 'lda_vector' will hold the LDA vector of all points per cell
+def partition_data_in_grid_lda(gdf, cell_size):
+    """Partitions a GeoDataFrame of points into a uniform grid of square cells.
+    
+    Args:
+         gdf: A GeoDataFrame containing the input points, each enhanced with its LDA vector.
+         cell_size: The size of the square cell (same units as the coordinates in the input data).
+         
+    Returns:
+          An R-tree index over the input points; also, a GeoDataFrame representing the centroids of the non-empty cells of the grid.
+    """
+    
+    # Spatial extent of the data   
+    min_lon, min_lat, max_lon, max_lat = gdf.geometry.total_bounds
+    
+    # create R-tree index over this dataset of points to facilitate cell assignment
+    prtree = index.Index()
+        
+    for idx, row in gdf.iterrows():
+        left, bottom, right, top = row['geometry'].x, row['geometry'].y, row['geometry'].x, row['geometry'].y
+        prtree.insert(idx, (left, bottom, right, top))
+        
+    # Create a data frame for the virtual grid of square cells and keep the categories of points therein
+    df_grid = pd.DataFrame(columns=['id','lon','lat','lda_vector'])
+    numEmptyCells = 0
+    for x0 in np.arange(min_lon - cell_size/2.0, max_lon + cell_size/2.0, cell_size):
+        for y0 in np.arange(min_lat - cell_size/2.0, max_lat + cell_size/2.0, cell_size):
+            # bounds
+            x1 = x0 + cell_size
+            y1 = y0 + cell_size
+            # Get all original points withing this cell from the rtree
+            points = list()
+            points = [n for n in prtree.intersection((x0, y0, x1, y1))]
+            if points:
+                subset = gdf.loc[gdf.index.isin(points)]
+                # Keep the centroid of each NON-EMPTY cell in the grid
+                cell = {'id':df_grid.size, 'lon':(x0 + x1)/2, 'lat':(y0 + y1)/2, 'lda_vector':[float(sum(col))/len(col) for col in zip(*subset['lda_vector'])]}
+                if not cell['lda_vector']:
+                    numEmptyCells += 1
+                    continue
+                # Append cell to the new dataframe
+                df_grid = df_grid.append(cell, ignore_index=True)
+            else:
+                numEmptyCells += 1
+    
+    print('Created grid partitioning with ' + str(df_grid.size) + ' non-empty cells containing ' + str(len(df_grid['id'])) + ' points ; ' + str(numEmptyCells) + ' empty cells omitted.')
     
     # Create a GeoDataFrame with all non-empty cell centroids
     gdf_grid = gpd.GeoDataFrame(df_grid, geometry=gpd.points_from_xy(df_grid['lon'], df_grid['lat']))
@@ -300,10 +405,8 @@ def pick_seeds(gdf, seeds_ratio):
     return seeds
 
 
-
 ########################### INTERNAL HELPER METHODS  ################################
    
-
 def check_cohesiveness(gdf, p, region, eps):
     """Checks if point p is within distance eps from at least one of the points in the region.
     
@@ -321,7 +424,6 @@ def check_cohesiveness(gdf, p, region, eps):
         if (p.distance(row['geometry']) < eps):
             return True
     return False
-
 
 
 def expand_region_with_neighbors(G, region):
@@ -359,10 +461,16 @@ def get_region_score(G, types, region, params):
          The score of the region, its relative entropy, and a vector with the values of POI type distribution .
     """
 
-    # Merge optional sublists of POI types into a single list
-    lst_cat = [G.nodes[n]['cat'] for n in region]
-    categories = [item for sublist in lst_cat for item in sublist]
-    init = [categories.count(t) for t in types]
+    if (params['settings']['use_lda'] == True):
+        # If LDA has been applied, the necessary vector is available
+        lst_cat = list(G.nodes[n]['cat'] for n in region)
+        init = [sum(x) for x in zip(*lst_cat)]
+    else:
+        # Merge optional sublists of POI types into a single list
+        lst_cat = [G.nodes[n]['cat'] for n in region]
+        categories = [item for sublist in lst_cat for item in sublist]
+        init = [categories.count(t) for t in types]
+        
     score, entr = compute_score(init, len(region), params)
     return score, entr, init
 
@@ -439,30 +547,23 @@ def show_map(gdf, region, colors):
     }
     
     region = gdf.loc[gdf.index.isin(region)]
-    cat = 'cat1'
 
     m = folium.Map(location=map_settings['location'], zoom_start=map_settings['zoom'], tiles=map_settings['tiles'])
     for idx, row in region.iterrows():
-        folium.Circle(
-            location=[row['geometry'].y, row['geometry'].x],
-            radius=map_settings['marker_size'],
-            popup=row['kwds'][0],
-            color=colors[row['kwds'][0]],
-            fill=True,
-            fill_color=colors[row['kwds'][0]],
-            fill_opacity=1
-        ).add_to(m)
+        p = render_point(row['geometry'], map_settings['marker_size'], gdf.loc[idx]['kwds'][0], colors)
+        p.add_to(m)
 
     return m
 
 
-def show_map_topk_convex_regions(gdf, colors, topk_regions):
+def show_map_topk_convex_regions(gdf, colors, topk_regions, use_lda=False):
     """Draws the convex hull around the points per region on the map. Each point is rendered with a color based on its type.
     
     Args:
          gdf: A GeoDataFrame containing the input points.
          colors: A list containing the color corresponding to each type.
          topk_regions: The list of top-k regions to be displayed.
+         use_lda: A Boolean denoting whether categories have been derived on-the-fly using LDA.
          
     Returns:
           A map displaying the top-k regions.
@@ -491,15 +592,11 @@ def show_map_topk_convex_regions(gdf, colors, topk_regions):
         for idx, row in gdf_region.iterrows():
             pts.append([row['geometry'].x, row['geometry'].y])
             coords.append([row['geometry'].y, row['geometry'].x])
-            folium.Circle(
-                location=[row['geometry'].y, row['geometry'].x],
-                radius=map_settings['marker_size'],
-                popup=gdf.loc[idx]['kwds'][0],
-                color=colors[gdf.loc[idx]['kwds'][0]],
-                fill=True,
-                fill_color=colors[gdf.loc[idx]['kwds'][0]],
-                fill_opacity=1
-            ).add_to(feature_group)
+            if (use_lda):
+                p = render_lda_point(row['geometry'], map_settings['marker_size'], gdf.loc[idx]['kwds'], gdf.loc[idx]['lda_vector'])
+            else:
+                p = render_point(row['geometry'], map_settings['marker_size'], gdf.loc[idx]['kwds'][0], colors)
+            p.add_to(feature_group)
         
         # Calculate the convex hull of the points in the regio
         poly = geometry.Polygon([pts[i] for i in ConvexHull(pts).vertices])
@@ -516,8 +613,7 @@ def show_map_topk_convex_regions(gdf, colors, topk_regions):
     return m
 
 
-
-def show_map_topk_grid_regions(gdf, prtree, colors, gdf_grid, cell_size, topk_regions):
+def show_map_topk_grid_regions(gdf, prtree, colors, gdf_grid, cell_size, topk_regions, use_lda=False):
     """Draws the points per grid-based region on the map. Each point is rendered with a color based on its type.
     
     Args:
@@ -527,6 +623,7 @@ def show_map_topk_grid_regions(gdf, prtree, colors, gdf_grid, cell_size, topk_re
          gdf_grid: The grid partitioning (cell centroids with their POI types) created over the input points.
          cell_size: The size of the square cell in the applied grid partitioning (user-specified distance threshold eps).
          topk_regions: The list of top-k grid-based regions to be displayed.
+         use_lda: A Boolean denoting whether categories have been derived on-the-fly using LDA.
          
     Returns:
           A map displaying the top-k regions along with the grid cells constituting each region.
@@ -573,15 +670,11 @@ def show_map_topk_grid_regions(gdf, prtree, colors, gdf_grid, cell_size, topk_re
         gdf_region = gdf.loc[gdf.index.isin(pts)]
         for idx, row in gdf_region.iterrows():
             coords.append([row['geometry'].y, row['geometry'].x])
-            folium.Circle(
-                location=[row['geometry'].y, row['geometry'].x],
-                radius=map_settings['marker_size'],
-                popup=gdf.loc[idx]['kwds'][0],
-                color=colors[gdf.loc[idx]['kwds'][0]],
-                fill=True,
-                fill_color=colors[gdf.loc[idx]['kwds'][0]],
-                fill_opacity=1
-            ).add_to(feature_group) 
+            if (use_lda):
+                p = render_lda_point(row['geometry'], map_settings['marker_size'], gdf.loc[idx]['kwds'], gdf.loc[idx]['lda_vector'])
+            else:
+                p = render_point(row['geometry'], map_settings['marker_size'], gdf.loc[idx]['kwds'][0], colors)
+            p.add_to(feature_group)
         
     # Fit map to the extent of topk-regions
     m.fit_bounds(coords)
@@ -589,6 +682,69 @@ def show_map_topk_grid_regions(gdf, prtree, colors, gdf_grid, cell_size, topk_re
     feature_group.add_to(m)
 
     return m
+
+
+def render_point(geom, marker_size, tag, colors):
+    """Renders a single point on the map with a color based on its type.
+    
+    Args:
+         geom: The point location.
+         marker_size: The size of the point marker.
+         tag: A string to be shown on the popup of the marker.
+         colors: A list containing the color corresponding to each type.
+         
+    Returns:
+          A circular marker to be rendered on map at the given location.
+    """
+        
+    p = folium.Circle(
+        location=[geom.y, geom.x],
+        radius=marker_size,
+        popup=tag,
+        color=colors[tag],
+        fill=True,
+        fill_color=colors[tag],
+        fill_opacity=1
+    )
+    
+    return p
+
+
+def render_lda_point(geom, marker_size, tags, lda_vector):
+    """Renders a single point on the map with a color based on its LDA vector used to assign it to a type.
+    
+    Args:
+         geom: The point location.
+         marker_size: The size of the point marker.
+         tags: A collection of strings to be shown on the popup of the marker.
+         lda_vector: The LDA vector used to assign this point to a type.
+         
+    Returns:
+          A circular marker to be rendered on map at the given location.
+    """    
+    
+    # Aggregate LDA vector into an array of three values to be used for creating the RGB color
+    v = np.pad(lda_vector, (0,3 - (len(lda_vector)%3)))
+    v = np.sum(v.reshape(-1, int(len(v)/3)), axis=1)
+    
+    # Generate the RGB color
+    r = round(v[0] * 255) if v[0] is not None else 0
+    g = round(v[1] * 255) if v[1] is not None else 0
+    b = round(v[2] * 255) if v[2] is not None else 0
+    color = '#{:02x}{:02x}{:02x}'.format(r, g, b)
+    
+    # Create the marker
+    p = folium.Circle(
+        location=[geom.y, geom.x],
+        radius=marker_size,
+        popup=tags,
+        color=color,
+        fill=True,
+        fill_color=color,
+        fill_opacity=1
+    )
+    
+    return p
 
 
 ############################# CIRCLE-BASED EXPANSION METHOD ############################
