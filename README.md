@@ -23,8 +23,9 @@ A Jupyter [notebook](notebooks/MixtureBestRegionSearch-NYC.ipynb) replicates the
 
 #### Graphical interface
 
-We demonstrate the entire framework using MAGE, a [graphical user interface](notebooks/MAGE-Demo-App.ipynb) that exposes the full functionality and allows users to easily specify their preferences and inspect the returned top-k regions on map. Also built in Python and powered by [ipywidgets](https://github.com/jupyter-widgets/ipywidgets) for Jupyter notebooks, this interactive HTML page can be deployed using [Voila](https://voila.readthedocs.io/en/stable/using.html). This GUI is organized in three panels and offers the ability to load a dataset with geolocated entities, preprocess it, and discover mixture-based regions with user-specified parametrization.
+We demonstrate the entire framework with [MAGE](notebooks/MAGE-Demo-App.ipynb), a graphical user interface that exposes the full functionality and allows users to easily specify their preferences and inspect the returned top-k regions on map. Also built in Python and powered by [ipywidgets](https://github.com/jupyter-widgets/ipywidgets) for Jupyter notebooks, this interactive HTML page can be deployed using [Voila](https://voila.readthedocs.io/en/stable/using.html). This GUI is organized in three panels and offers the ability to load a dataset with geolocated entities, preprocess it, and discover mixture-based regions with user-specified parametrization.
 
+You may watch this short [video](https://drive.google.com/file/d/1-BwoBE1zrDvktTJIn2lcInTdDIZIO_WN/view) (5 minutes) that offers a quick tour of MAGE for discovering mixture-based areas of interest over Points of Interest (shops, restaurants, museums, etc.) in Athens [extracted in CSV format](http://download.slipo.eu/results/osm-to-csv/) from [OpenStreetMap](https://www.openstreetmap.org/).
 
 #### Acknowledgment
 
