@@ -12,10 +12,11 @@ import random
 from random import sample
 import time
 from scipy.stats import entropy
+from itertools import product
 import heapq
 import folium
-
 import json
+
 from scipy.spatial import ConvexHull, Delaunay
 from shapely import geometry
 from shapely.geometry import Point, Polygon, box, mapping
@@ -24,6 +25,17 @@ from shapely.ops import cascaded_union, polygonize, unary_union
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
 from sklearn.model_selection import GridSearchCV
+
+from skopt import Space
+from skopt import Optimizer
+from skopt.space.space import Integer
+from skopt.space.space import Categorical
+
+from skopt.learning import GaussianProcessRegressor
+from skopt.learning.gaussian_process.kernels import ConstantKernel, Matern
+from sklearn.gaussian_process.kernels import (RBF, Matern, RationalQuadratic,
+                                              ExpSineSquared, DotProduct,
+                                              ConstantKernel)
 
 
 ########################### LOADING INPUT DATASET ################################
@@ -125,6 +137,34 @@ def kwds_freq(gdf, col_kwds='kwds', normalized=False):
                            reverse=True))
 
     return kwds_freq_dict
+
+
+def bounds(gdf):
+    """Calculates the bounding coordinates (left, bottom, right, top) in the given GeoDataFrame.
+    
+    Args:
+         gdf: A GeoDataFrame containing the input points.
+         
+    Returns:
+          An array [minx, miny, maxx, maxy] denoting the spatial extent. 
+    """
+        
+    bounds = gdf.total_bounds  
+    return bounds
+
+
+def id_to_loc(gdf, fid):
+    """Provides the location (coordinates) of the given feature identifier in the GeoDataFrame.
+    
+    Args:
+         gdf: A GeoDataFrame containing the input points.
+         fid: The identifier of a feature in the GeoDataFrame.
+         
+    Returns:
+          An array [x, y] denoting the coordinates of the feature. 
+    """
+    
+    return [gdf.loc[fid]['geometry'].x, gdf.loc[fid]['geometry'].y]
 
 
 def get_types(gdf):
@@ -308,7 +348,7 @@ def partition_data_in_grid(gdf, cell_size):
             if points:
                 subset = gdf.loc[gdf.index.isin(points)]
                 # Keep the centroid of each NON-EMPTY cell in the grid
-                cell = {'id':df_grid.size, 'lon':(x0 + x1)/2, 'lat':(y0 + y1)/2, 'kwds':subset['kwds'].map(lambda x: x[0]).tolist()}
+                cell = {'id':len(df_grid), 'lon':(x0 + x1)/2, 'lat':(y0 + y1)/2, 'kwds':subset['kwds'].map(lambda x: x[0]).tolist()}
                 if not cell['kwds']:
                     numEmptyCells += 1
                     continue
@@ -317,7 +357,7 @@ def partition_data_in_grid(gdf, cell_size):
             else:
                 numEmptyCells += 1
     
-    print('Created grid partitioning with ' + str(df_grid.size) + ' non-empty cells containing ' + str(len(np.concatenate(df_grid['kwds']))) + ' points ; ' + str(numEmptyCells) + ' empty cells omitted.')
+    print('Created grid partitioning with ' + str(len(df_grid)) + ' non-empty cells containing ' + str(len(np.concatenate(df_grid['kwds']))) + ' points ; ' + str(numEmptyCells) + ' empty cells omitted.')
     
     # Create a GeoDataFrame with all non-empty cell centroids
     gdf_grid = gpd.GeoDataFrame(df_grid, geometry=gpd.points_from_xy(df_grid['lon'], df_grid['lat']))
@@ -364,7 +404,7 @@ def partition_data_in_grid_lda(gdf, cell_size):
             if points:
                 subset = gdf.loc[gdf.index.isin(points)]
                 # Keep the centroid of each NON-EMPTY cell in the grid
-                cell = {'id':df_grid.size, 'lon':(x0 + x1)/2, 'lat':(y0 + y1)/2, 'lda_vector':[float(sum(col))/len(col) for col in zip(*subset['lda_vector'])]}
+                cell = {'id':len(df_grid), 'lon':(x0 + x1)/2, 'lat':(y0 + y1)/2, 'lda_vector':[float(sum(col))/len(col) for col in zip(*subset['lda_vector'])]}
                 if not cell['lda_vector']:
                     numEmptyCells += 1
                     continue
@@ -373,7 +413,7 @@ def partition_data_in_grid_lda(gdf, cell_size):
             else:
                 numEmptyCells += 1
     
-    print('Created grid partitioning with ' + str(df_grid.size) + ' non-empty cells containing ' + str(len(df_grid['id'])) + ' points ; ' + str(numEmptyCells) + ' empty cells omitted.')
+    print('Created grid partitioning with ' + str(len(df_grid)) + ' non-empty cells containing ' + str(len(df_grid['id'])) + ' points ; ' + str(numEmptyCells) + ' empty cells omitted.')
     
     # Create a GeoDataFrame with all non-empty cell centroids
     gdf_grid = gpd.GeoDataFrame(df_grid, geometry=gpd.points_from_xy(df_grid['lon'], df_grid['lat']))
@@ -426,19 +466,30 @@ def check_cohesiveness(gdf, p, region, eps):
     return False
 
 
-def expand_region_with_neighbors(G, region):
-    """Expands a given region with its neighboring nodes according to the graph.
+def get_neighbors(G, region):
+    """Provides the set of points neighboring the given region according to the connectivity graph.
     
     Args:
          G: The spatial connectivity graph over the input points.
+         region: The set of points in the region.     
+                  
+    Returns:
+         The set of points that are within distance eps from at least one point currently in the region.
+    """
+    
+    return set([n for v in region for n in list(G[v]) if n not in region])
+
+
+def expand_region_with_neighbors(region, neighbors):
+    """Expands a given region with its neighboring nodes according to the graph.
+    
+    Args:
          region: The set of points currently in the region.
+         neighbors: The set of border points that are within distance eps from at least one point currently in the region.
                   
     Returns:
          The expanded region.
     """
-
-    # Collect POIs neighboring a given region according to the graph
-    neighbors = [n for v in region for n in list(G[v]) if n not in region]
     
     region_ext = set(region.copy())
     # update region
@@ -475,9 +526,33 @@ def get_region_score(G, types, region, params):
     return score, entr, init
 
 
+def get_core_border(G, region):
+    """Distinuishes the core and border points contained in the given region according to the connectivity graph.
+    
+    Args:
+         G: The spatial connectivity graph over the input points.
+         region: The set of points in the region.     
+                  
+    Returns:
+         The core and border of points in the region.
+    """
+    
+    region = set(region)
+    ## identify core points
+    core = set([])
+    for point in region:
+        if not ( set(list(G[point])) - region ):
+            core.add(point)
+    ## get border from core
+    border = get_neighbors(G, core)
+    
+    return core, border
+
+    
+
 ## INTERNAL ROUTINE USED BY ALL SEARCH METHODS
 def update_topk_list(topk_regions, region_core, region_border, rel_se, score, init, params, start_time, updates):
-    """Checks and updates the list of top-k region with a candidate region.
+    """Checks and updates the list of top-k regions with a candidate region, also examining their degree of overlap.
     
     Args:
          topk_regions: The current list of top-k best regions.
@@ -494,7 +569,6 @@ def update_topk_list(topk_regions, region_core, region_border, rel_se, score, in
          The updated list of the top-k best regions.
     """
 
-    
     # Insert this candidate region into the maxheap of top-k regions according to its score...
     if (score > topk_regions[-1][0]):
         # ...as long as it does NOT significantly overlap with existing regions 
@@ -504,7 +578,7 @@ def update_topk_list(topk_regions, region_core, region_border, rel_se, score, in
         # check degree of overlap with existing regions
         for i in range(len(topk_regions)):
             cur = set(topk_regions[i][2][0].union(topk_regions[i][2][1]))  # existing region (core + border) in the list 
-            if (len(cur)>0) and ((len(cur.intersection(cand)) / len(cur) >= params['settings']['overlap_threshold']) or (len(cur.intersection(cand)) / len(cand) >= params['settings']['overlap_threshold'])):
+            if (len(cur)>0) and ((len(cur.intersection(cand)) / len(cur) > params['settings']['overlap_threshold']) or (len(cur.intersection(cand)) / len(cand) > params['settings']['overlap_threshold'])):
                 if score > topk_regions[i][0]:
                     discarded.append(topk_regions[i])
                 else:
@@ -566,7 +640,7 @@ def show_map_topk_convex_regions(gdf, colors, topk_regions, use_lda=False):
          use_lda: A Boolean denoting whether categories have been derived on-the-fly using LDA.
          
     Returns:
-          A map displaying the top-k regions.
+          A map displaying the top-k regions; also a dataframe with statistics per region.
     """
     
     map_settings = {
@@ -575,8 +649,10 @@ def show_map_topk_convex_regions(gdf, colors, topk_regions, use_lda=False):
         'tiles': 'Stamen toner',
         'marker_size': 10
     }
-    
+    # Create a map
     m = folium.Map(location=map_settings['location'], zoom_start=map_settings['zoom'], tiles=map_settings['tiles'])
+    # Also create a data frame with statistics about the resulting regions
+    df_regions = pd.DataFrame({'rank': pd.Series(dtype='int64'), 'score': pd.Series(dtype='float64'), 'num_points': pd.Series(dtype='int64')})
     
     coords = []
     feature_group = folium.FeatureGroup(name="points")
@@ -598,7 +674,11 @@ def show_map_topk_convex_regions(gdf, colors, topk_regions, use_lda=False):
                 p = render_point(row['geometry'], map_settings['marker_size'], gdf.loc[idx]['kwds'][0], colors)
             p.add_to(feature_group)
         
-        # Calculate the convex hull of the points in the regio
+        df_regions = df_regions.append({'rank': rank, 'score': score, 'num_points': len(pts)}, ignore_index=True)
+        
+        if len(pts) < 3:  # Cannot draw convex hull of region with less than tree points
+            continue
+        # Calculate the convex hull of the points in the region
         poly = geometry.Polygon([pts[i] for i in ConvexHull(pts).vertices])
         # convert the convex hull to geojson and draw it on the background according to its score
         style_ = {'fillColor': '#ffffbf', 'fill': True, 'lineColor': '#ffffbf','weight': 3,'fillOpacity': (1-0.5*score)}
@@ -610,7 +690,7 @@ def show_map_topk_convex_regions(gdf, colors, topk_regions, use_lda=False):
 
     feature_group.add_to(m)
 
-    return m
+    return m, df_regions
 
 
 def show_map_topk_grid_regions(gdf, prtree, colors, gdf_grid, cell_size, topk_regions, use_lda=False):
@@ -626,7 +706,7 @@ def show_map_topk_grid_regions(gdf, prtree, colors, gdf_grid, cell_size, topk_re
          use_lda: A Boolean denoting whether categories have been derived on-the-fly using LDA.
          
     Returns:
-          A map displaying the top-k regions along with the grid cells constituting each region.
+          A map displaying the top-k regions along with the grid cells constituting each region; also a dataframe with statistics per region.
     """
     
     map_settings = {
@@ -635,8 +715,10 @@ def show_map_topk_grid_regions(gdf, prtree, colors, gdf_grid, cell_size, topk_re
         'tiles': 'Stamen toner',
         'marker_size': 10
     }
-    
+    # Create a map
     m = folium.Map(location=map_settings['location'], zoom_start=map_settings['zoom'], tiles=map_settings['tiles'])
+    # Also create a data frame with statistics about the resulting regions
+    df_regions = pd.DataFrame({'rank': pd.Series(dtype='int'), 'score': pd.Series(dtype='float'), 'num_cells': pd.Series(dtype='int'), 'num_points': pd.Series(dtype='int')})
     
     coords = []
     feature_group = folium.FeatureGroup(name="points")
@@ -676,12 +758,14 @@ def show_map_topk_grid_regions(gdf, prtree, colors, gdf_grid, cell_size, topk_re
                 p = render_point(row['geometry'], map_settings['marker_size'], gdf.loc[idx]['kwds'][0], colors)
             p.add_to(feature_group)
         
+        df_regions = df_regions.append({'rank': rank, 'score': score,  'num_cells': len(cells), 'num_points': len(pts)}, ignore_index=True)
+        
     # Fit map to the extent of topk-regions
     m.fit_bounds(coords)
 
     feature_group.add_to(m)
 
-    return m
+    return m, df_regions
 
 
 def render_point(geom, marker_size, tag, colors):
@@ -760,7 +844,7 @@ def run_circular_scan(gdf, rtree, G, seeds, params, eps, types, topk_regions, st
          params: The configuration parameters.
          eps: The distance threshold.
          types: The set of distinct point types.
-         top_regions: A list to hold the top-k results.
+         topk_regions: A list to hold the top-k results.
          start_time: The starting time of the execution.
          updates: A structure to hold update times of new results.
          
@@ -792,15 +876,16 @@ def run_circular_scan(gdf, rtree, G, seeds, params, eps, types, topk_regions, st
             continue
             
         # SCORE ESTIMATION
-        region = expand_region_with_neighbors(G, region) # Candidate region is expanded with border points
-        if len(region) > params['variables']['max_size']['current']:
+        region_border = get_neighbors(G, region)
+        region_ext = expand_region_with_neighbors(region, region_border) # Candidate region is expanded with border points
+        if len(region_ext) > params['variables']['max_size']['current']:
             continue 
         
         # Estimate score by applying EXPANSION with neighbors
-        score, rel_se, init = get_region_score(G, types, region, params)   
+        score, rel_se, init = get_region_score(G, types, region_ext, params)   
 
         # update top-k list with this candidate
-        topk_regions = update_topk_list(topk_regions, region, set(), rel_se, score, init, params, start_time, updates)
+        topk_regions = update_topk_list(topk_regions, set(region), region_border, rel_se, score, init, params, start_time, updates)
     
         # Push this seed into a priority queue
         heapq.heappush(queue, (-score, (s, local_size, dist_farthest)))
@@ -839,23 +924,22 @@ def run_circular_scan(gdf, rtree, G, seeds, params, eps, types, topk_regions, st
             continue
             
         # COMPLETENESS CONSTRAINT: Skip this seed if expanded region exceeds max_size
-        region = expand_region_with_neighbors(G, region)
-        if len(region) > params['variables']['max_size']['current']:
+        region_border = get_neighbors(G, region)
+        region_ext = expand_region_with_neighbors(region, region_border) # Candidate region is expanded with border points
+        if len(region_ext) > params['variables']['max_size']['current']:
             continue 
     
         # SCORE ESTIMATION by applying EXPANSION with neighbors
-        score, rel_se, init = get_region_score(G, types, region, params) 
+        score, rel_se, init = get_region_score(G, types, region_ext, params) 
     
         # update top-k score and region
-        topk_regions = update_topk_list(topk_regions, region, set(), rel_se, score, init, params, start_time, updates)
+        topk_regions = update_topk_list(topk_regions, set(region), region_border, rel_se, score, init, params, start_time, updates)
         
         # Push this seed back to the queue
         heapq.heappush(queue, (-score, (s, local_size, dist_farthest)))
   
     # Return top-k regions found within time budget
     return topk_regions
-
-    
 
 
 ############################## GRAPH-EXPANSION METHODS ##################################
@@ -1199,7 +1283,489 @@ def run_adaptive_hybrid(G, seeds, params, types, topk_regions, start_time, updat
     return topk_regions
 
 
+############################## ADAPTIVE-GRID METHOD ##################################
 
+## Search At Point
+
+def greedy_search_at(G, seed, params, types, topk_regions, start_time, updates, n_expansions=-1, mode='ExpandBest'):
+    
+    if n_expansions == -1:
+        n_expansions = params['variables']['max_size']['current']
+    if mode == 'ExpandBest':
+        return greedy_search_best_at(G, seed, params, types, topk_regions, start_time, updates, n_expansions)
+    elif mode == 'ExpandAll':
+        return greedy_search_all_at(G, seed, params, types, topk_regions, start_time, updates, n_expansions)
+    
+
+    
+    
+def greedy_search_best_at(G, seed, params, types, topk_regions, start_time, updates, n_expansions=-1):
+    
+    max_size = params['variables']['max_size']['current']
+    if n_expansions == -1:
+        n_expansions = max_size
+    
+    region_core = set([seed])
+    region_border = get_neighbors(G, region_core)
+    region = region_core.union(region_border)
+    
+    score, rel_se, init = get_region_score(G, types, region, params)
+
+    # update top-k regions
+    topk_regions = update_topk_list(topk_regions, region_core, region_border, rel_se, score, init, params, start_time, updates)
+            
+    size = 1
+    depth = 0
+    overall_best_score = score
+    overall_best_region = region
+    while size < max_size and depth < n_expansions:
+        depth += 1
+
+        core, border = get_core_border(G, region)
+        if len(region) == 1: ## first point
+            border = get_neighbors(G, region)
+
+        neighbors = border
+        best_score = 0
+        best_neighbor = None
+        for v in neighbors:
+            new_nodes = set([n for n in list(G[v]) if n not in region])
+            new_nodes.add(v)
+
+            new_region = region | new_nodes ## union
+            
+            if len(new_region) > max_size:
+                continue 
+
+            new_score, new_rel_se, new_init = get_region_score(G, types, new_region, params)
+
+            # update top-k regions
+            topk_regions = update_topk_list(topk_regions, region, new_nodes, new_rel_se, new_score, new_init, params, start_time, updates)
+      
+            if new_score > best_score:
+                best_score = new_score
+                best_neighbor = v
+        if best_neighbor:
+            new_nodes = set([n for n in list(G[best_neighbor]) if n not in region])
+            new_nodes.add(best_neighbor)
+            region = region | new_nodes ## union
+            size = len(region)
+            score, rel_se, init = get_region_score(G, types, region, params)
+            assert(score == best_score)
+            if score > overall_best_score:
+                overall_best_score = score
+                overall_best_region = region
+            # update top-k regions
+            # storing the region just found according to the best neighbor
+            topk_regions = update_topk_list(topk_regions, region, new_nodes, rel_se, score, init, params, start_time, updates)
+        else:
+            break
+    
+    return overall_best_score, overall_best_region, topk_regions
+
+
+
+def greedy_search_all_at(G, seed, params, types, topk_regions, start_time, updates, n_expansions=-1):
+    
+    max_size = params['variables']['max_size']['current']
+    if n_expansions == -1:
+        n_expansions = max_size
+
+    region = expand_region_with_neighbors(G, set([seed]))
+    score, rel_se, init = get_region_score(G, types, region, params)
+
+    best_score = score
+    best_region = region
+
+    size = 1
+    depth = 0
+    while size < max_size and depth < n_expansions:
+        region_core = region
+        region_border = get_neighbors(G, region_core)
+        region = region_core.union(region_border)  
+        #region = expand_region_with_neighbors(G, region)
+        score, rel_se, init = get_region_score(G, types, region, params)
+
+        if score > best_score:
+            best_score = score
+            best_region = region
+
+        # update top-k regions
+        topk_regions = update_topk_list(topk_regions, region_core, region_border, rel_se, score, init, params, start_time, updates)
+        size = len(region)
+        depth += 1
+    
+    score = best_score
+    region = best_region
+    
+    return score, region, topk_regions
+
+
+
+# Grid class
+
+class Grid:
+
+    def __init__(self, rtree, gdf, gran, xmin, ymin, xmax, ymax):
+        
+        self.gran = gran ## common granularity per axis
+
+        self.rtree = rtree
+        self.gdf = gdf
+        self.xmin = xmin
+        self.ymin = ymin
+        self.xmax = xmax
+        self.ymax = ymax
+
+        # square cell size (picking the max value in the two axes)
+        self.cellSize = max((xmax - xmin)/gran, (ymax - ymin)/gran)
+        
+        self.build_grid_from_rtree()
+
+            
+    def build_grid_from_rtree(self):
+        
+        left = self.xmin
+        bottom = self.ymin
+        right = self.xmax
+        top = self.ymax
+        self.the_grid = dict()
+        self.non_empty_cells = []
+        for cell_x, cell_y in product(range(self.gran), range(self.gran)):
+            left = self.xmin + cell_x * self.cellSize
+            bottom = self.ymin + cell_y * self.cellSize
+            right = self.xmin + (cell_x + 1) * self.cellSize
+            top = self.ymin + (cell_y + 1) * self.cellSize
+
+            cell_points = [n for n in self.rtree.intersection((left, bottom, right, top))]
+
+            if cell_points:
+                self.non_empty_cells.append( (cell_x, cell_y) )
+
+            self.the_grid[(cell_x, cell_y)] = cell_points
+
+
+    def get_cell_coords(self, cell_x, cell_y):
+        
+        cell_xmin = self.xmin + cell_x * self.cellSize
+        cell_ymin = self.ymin + cell_y * self.cellSize
+        cell_xmax = self.xmin + (cell_x + 1) * self.cellSize
+        cell_ymax = self.ymin + (cell_y + 1) * self.cellSize
+        return cell_xmin, cell_ymin, cell_xmax, cell_ymax
+
+
+    def get_random_seed_in_cell(self, cell_x, cell_y):
+        
+        points = self.the_grid[(cell_x, cell_y)]
+        seed = None
+        if points:
+            seed = random.choice(points)
+        return seed
+
+
+    def get_cell(self, x, y):
+        
+        if x < self.xmin or x > self.xmax or y < self.ymin or y > self.ymax:
+            return None
+        cell_x = math.floor( (x-self.xmin) / self.cellSize )
+        cell_y = math.floor( (y-self.ymin) / self.cellSize )
+        return ( cell_x, cell_y )
+
+
+class Grid_Search:
+
+    def __init__(self, gran, indices, params, types, start_time, space_coords=None):
+        
+        self.gdf, self.rtree, self.G = indices
+        self.params = params
+        self.types = types
+        self.start_time = start_time
+
+        ## construct grid
+        if space_coords is None: ## entire space
+            self.xmin, self.ymin, self.xmax, self.ymax = bounds(self.gdf)
+            space_coords = (self.xmin, self.ymin, self.xmax, self.ymax)
+            
+        self.grid = Grid(self.rtree, self.gdf, gran, *space_coords)
+        
+        ## find non empty cells
+        self.non_empty_cells = self.grid.non_empty_cells
+        self.n_non_empty_cells = len(self.non_empty_cells)
+
+        ## map from cell-id to cell coords
+        self.cell_id_to_cell = dict()
+        for cell_id, cell in enumerate(self.non_empty_cells):
+            self.cell_id_to_cell[cell_id] = cell
+
+        ## initialize the history per cell; { cell: [ (seed, (coords), score) ] }
+        self.grid_history = dict()
+        for i in range(self.grid.gran):
+            for j in range(self.grid.gran):
+                self.grid_history[(i,j)] = []
+    
+
+    def search(self, n_samples, explore_mode, topk_regions, start_time, updates, w_sample=True):
+        
+        best_score = 0
+        if w_sample: ## sample cells
+            for i in range(n_samples):
+                if (time.time() - self.start_time) > self.params['variables']['time_budget']['current']:
+                    break
+                cell_id = random.randint(0, self.n_non_empty_cells-1)
+                cell = self.cell_id_to_cell[cell_id]
+                
+                while (seed := self.grid.get_random_seed_in_cell(*cell)) is None:
+                    pass
+                
+                score, _ , topk_regions = greedy_search_at(self.G, seed, self.params, self.types, topk_regions, start_time, updates, mode=explore_mode)
+                if score > best_score:
+                    best_score = score
+                self.grid_history[cell].append( (seed, id_to_loc(self.gdf, seed), score) )
+        else: 
+            for cell in self.non_empty_cells[:n_samples]:
+                if (time.time() - self.start_time) > self.params['variables']['time_budget']['current']:
+                    break
+                
+                seed = self.grid.get_random_seed_in_cell(*cell)
+                score, _ , topk_regions = greedy_search_at(self.G, seed, self.params, self.types, topk_regions, start_time, updates, mode=explore_mode)
+                if score > best_score:
+                    best_score = score
+                self.grid_history[cell].append( (seed, id_to_loc(self.gdf, seed), score) )
+        
+        return best_score
+
+
+    def get_top_cells(self, n_cells):
+        
+        cell_max_scores = []
+        for cell in self.grid_history.keys():
+            if not self.grid_history[cell]:
+                continue
+            max_item = max(self.grid_history[cell], key=lambda tup: tup[2])
+            cell_max_scores.append( (cell, max_item[0], max_item[2]) )
+        
+        cell_max_scores = sorted(cell_max_scores, key=lambda tup: tup[2], reverse=True)
+
+        return cell_max_scores[:n_cells]
+
+
+
+class Grid_Search_Simple:
+
+    def __init__(self, gran, indices, params, types, start_time, space_coords=None):
+        
+        self.gdf, self.rtree, self.G = indices
+        self.params = params
+        self.types = types
+        self.start_time = start_time
+
+        ## construct grid
+        if space_coords is None: ## entire space
+            self.xmin, self.ymin, self.xmax, self.ymax = bounds(self.gdf)
+            space_coords = (self.xmin, self.ymin, self.xmax, self.ymax)
+            
+        self.grid = Grid(self.rtree, self.gdf, gran, *space_coords)
+        
+        ## find non empty cells
+        self.active_cells = self.grid.non_empty_cells
+
+        ## map from cell-id to cell coords
+        self.cell_id_to_cell = dict()
+        for cell_id, cell in enumerate(self.active_cells):
+            self.cell_id_to_cell[cell_id] = cell
+
+        ## initialize the history per cell; { cell: [ (seed, (coords), score) ] }
+        self.grid_history = dict()
+        for i in range(self.grid.gran):
+            for j in range(self.grid.gran):
+                self.grid_history[(i,j)] = []
+    
+
+    def set_active_cells(self, n_cells, topk_regions, start_time, updates, explore_mode):
+        
+        new_active_cells = []
+        for cell in self.active_cells:
+            if (time.time() - self.start_time) > self.params['variables']['time_budget']['current']:
+                break
+            seed = self.grid.get_random_seed_in_cell(*cell)
+            score, _, topk_regions = greedy_search_at(self.G, seed, self.params, self.types, topk_regions, start_time, updates, mode=explore_mode)
+            # print(cell, seed, score)
+            self.grid_history[cell].append( (seed, id_to_loc(self.gdf, seed), score) )
+        
+        cell_max_scores = []
+        for cell in self.active_cells:
+            if not self.grid_history[cell]:
+                continue
+            max_item = max(self.grid_history[cell], key=lambda tup: tup[2])
+            cell_max_scores.append( (cell, max_item[0], max_item[2]) ) # cell, seed, score
+        cell_max_scores = sorted(cell_max_scores, key=lambda tup: tup[2], reverse=True)
+        
+        new_active_cells = [ tup[0] for tup in cell_max_scores[:n_cells] ]
+        
+        self.active_cells = new_active_cells
+
+    
+    def search_cell(self, cell, n_samples, topk_regions, start_time, updates, explore_mode):
+        
+        for i in range(n_samples):
+            if (time.time() - self.start_time) > self.params['variables']['time_budget']['current']:
+                break
+            while (seed := self.grid.get_random_seed_in_cell(*cell)) is None:
+                pass
+            score, _, topk_regions = greedy_search_at(self.G, seed, self.params, self.types, topk_regions, start_time, updates, mode=explore_mode)
+            self.grid_history[cell].append( (seed, id_to_loc(self.gdf, seed), score) )
+
+    
+    def pick_cell(self):
+        
+        return random.choice(self.active_cells)
+
+
+    
+
+class Meta_Grid_Search:
+
+    def __init__(self, gran, indices, params, types, start_time, space_coords_s, w_bayes=False):
+        
+        self.gdf, self.rtree, self.G = indices
+        self.params = params
+        self.types = types
+        self.start_time = start_time
+
+        self.n_cells = len(space_coords_s)
+        self.w_bayes = w_bayes
+
+        ## Bayes Initialization
+        if self.w_bayes:
+            dimensions = [Categorical(range(self.n_cells))]
+            kernel = 1.0 * Matern(length_scale=1.0, length_scale_bounds=(1e-1, 10.0),
+                                nu=1.5)
+            gpr = GaussianProcessRegressor(kernel=kernel, alpha=1e-10,
+                                        normalize_y=True, noise="gaussian",
+                                        n_restarts_optimizer=2)
+            self.opt = Optimizer(dimensions, base_estimator=gpr, acq_optimizer="sampling", 
+                                    n_initial_points = 10)
+
+        self.grid_searches = []
+        for space_coords in space_coords_s:
+            grid_search = Grid_Search(gran, indices, params, types, start_time, space_coords=space_coords)
+            self.grid_searches.append(grid_search)
+    
+    
+    def search(self, n_samples, topk_regions, start_time, updates, explore_mode):
+        
+        if self.w_bayes:
+            n_samples_per_probe = 10
+            for i in range (int(n_samples / n_samples_per_probe)):
+                if (time.time() - self.start_time) > self.params['variables']['time_budget']['current']:
+                    break
+                grid_id = self.opt.ask()[0] ## get a suggestion; NOTE: returns a list
+
+                score = self.grid_searches[grid_id].search(n_samples_per_probe, topk_regions, start_time, updates, explore_mode)
+                self.opt.tell([grid_id], -score) ## learn from a suggestion; NOTE: requires a list as x
+        
+        else: ## no bayes
+            for i in range(n_samples):
+                if (time.time() - self.start_time) > self.params['variables']['time_budget']['current']:
+                    break
+                grid_id = random.randint(0, self.n_cells-1)
+                self.grid_searches[grid_id].search(1, topk_regions, start_time, updates, explore_mode)
+    
+    
+def run_adaptive_grid(gdf, rtree, G, params, types, topk_regions, start_time, updates):
+    """Executes the AdaptiveGrid algorithm. Employs a top-tier grid to identify promising cells and then applies ExpandBest over seeds that may be chosen using Bayesian optimization within those cells.
+    
+    Args:
+         gdf: A GeoDataFrame containing the input points.
+         rtree: The R-tree index constructed over the input points.
+         G: The spatial connectivity graph over the input points.
+         params: The configuration parameters.
+         types: The set of distinct point types.
+         topk_regions: A list to hold the top-k results.
+         start_time: The starting time of the execution.
+         updates: A structure to hold update times of new results.
+         
+    Returns:
+          The list of top-k regions found within the given time budget.
+    """   
+    
+    indices = (gdf, rtree, G)
+    
+    # Specification of AdaptiveGrid parameters
+    top_mode = params['grid']['top_mode']  # 'ExpandBest'
+    n_top_samples = params['grid']['n_top_samples']  # 1000
+    top_gran = params['grid']['top_gran']  # 20
+    bot_gran = params['grid']['bot_gran']  # 10
+    n_cells = params['grid']['n_cells']    # 20
+    n_bot_samples = params['grid']['n_bot_samples']  # 100000
+    w_bayes = params['grid']['use_bayes']
+    
+    # Search in the top-tier grid ...
+    gs = Grid_Search(top_gran, indices, params, types, start_time)
+    # ... and identify promising cells for exploration
+    gs.search(n_top_samples, top_mode, topk_regions, start_time, updates, w_sample=True)
+    
+    # Search for regions in a bottom-tier grid constructed for each chosen cell
+    if n_cells != 0:
+        space_coords_s = [ gs.grid.get_cell_coords(*tup[0]) for tup in gs.get_top_cells(n_cells) ]
+        # Apply a grid inside this cell and then explore for regions with ExpandBest
+        mgs = Meta_Grid_Search(bot_gran, indices, params, types, start_time, space_coords_s, w_bayes)
+        mgs.search(n_bot_samples, 'ExpandBest', topk_regions, start_time, updates)
+
+    # Return the top-k regions by descending score
+    topk_regions = sorted(topk_regions, key=lambda topk_regions: topk_regions[0], reverse=True)
+    if (len(topk_regions) > params['settings']['top_k']):
+        topk_regions = topk_regions[:params['settings']['top_k']]
+
+    return topk_regions, updates
+
+
+
+def run_adaptive_grid_simple(gdf, rtree, G, params, types, topk_regions, start_time, updates):
+    """Executes the simplified AdaptiveGrid algorithm. Employs a top-tier grid to identify promising cells and then applies ExpandBest on random seeds chosen within those cells.
+    
+    Args:
+         gdf: A GeoDataFrame containing the input points.
+         rtree: The R-tree index constructed over the input points.
+         G: The spatial connectivity graph over the input points.
+         params: The configuration parameters.
+         types: The set of distinct point types.
+         topk_regions: A list to hold the top-k results.
+         start_time: The starting time of the execution.
+         updates: A structure to hold update times of new results.
+         
+    Returns:
+          The list of top-k regions found within the given time budget.
+    """
+    
+    indices = (gdf, rtree, G)
+    
+    # Specification of AdaptiveGrid parameters
+    top_mode = params['grid']['top_mode']  # 'ExpandBest'
+    top_gran = params['grid']['top_gran']  # 20
+    n_cells = params['grid']['n_cells']    # 20
+    n_bot_samples = params['grid']['n_bot_samples']  # 100000
+
+    # Search in the top-tier grid ...
+    gs = Grid_Search_Simple(top_gran, indices, params, types, start_time)
+    # ... and identify promising cells for exploration
+    gs.set_active_cells(n_cells, topk_regions, start_time, updates, explore_mode=top_mode)
+
+    # Search for regions in a bottom-tier grid constructed for each chosen cell
+    n_samples_per_cell = 10   # Fixed number of samples per cell
+    for i in range (int(n_bot_samples / n_samples_per_cell)):
+        cell = gs.pick_cell()
+        gs.search_cell(cell, n_samples_per_cell, topk_regions, start_time, updates, explore_mode='ExpandBest')
+
+    # Return the top-k regions by descending score
+    topk_regions = sorted(topk_regions, key=lambda topk_regions: topk_regions[0], reverse=True)
+    if (len(topk_regions) > params['settings']['top_k']):
+        topk_regions = topk_regions[:params['settings']['top_k']]   
+    
+    return topk_regions, updates
+
+
+############################## GENERIC INTERFACE FOR ALL STRATEGIES ##################################    
 
 def run(gdf, G, rtree, types, params, eps):
     """Computes the top-k high/low mixture regions.
@@ -1215,9 +1781,7 @@ def run(gdf, G, rtree, types, params, eps):
     Returns:
          The list of top-k regions detected within the given time budget.
     """
-    
-#    print('entropy_mode: ' + params['entropy_mode']['current'] + '  method: ' + params['methods']['current'])
-    
+       
     # Pick seeds from input points
     if (params['methods']['current'] == 'CircularScan'):
         seeds = pick_seeds(gdf, params['settings']['seeds_ratio'])
@@ -1226,10 +1790,9 @@ def run(gdf, G, rtree, types, params, eps):
             
     start_time = time.time()
     
-    # Initialize top-k list
+    # Initialize top-k list with one dummy region of zero score
     topk_regions = []
-    while len(topk_regions) < params['settings']['top_k']:
-        topk_regions.append([0, 0, [set(), set()], [], 0])   # [score, rel_se, [region_core, region_border], init, length]
+    topk_regions.append([0, 0, [set(), set()], [], 0])   # [score, rel_se, [region_core, region_border], init, length]
 
     iterations = 0
     updates = dict()
@@ -1238,6 +1801,8 @@ def run(gdf, G, rtree, types, params, eps):
         topk_regions = run_adaptive_hybrid(G, seeds, params, types, topk_regions, start_time, updates)
     elif params['methods']['current'] == 'CircularScan':
         topk_regions = run_circular_scan(gdf, rtree, G, seeds, params, eps, types, topk_regions, start_time, updates)
+    elif params['methods']['current'] == 'AdaptiveGrid':
+        topk_regions, updates = run_adaptive_grid(gdf, rtree, G, params, types, topk_regions, start_time, updates)
     else:   # ExpandBest or ExpandAll methods
         queue, topk_regions = init_queue(G, seeds, types, params, topk_regions, start_time, updates)
         # Process queue
@@ -1245,6 +1810,6 @@ def run(gdf, G, rtree, types, params, eps):
             iterations += 1
             score, topk_regions = process_queue(G, queue, topk_regions, params, types, start_time, updates)
     
-#    print('Execution time: ' + str(time.time() - start_time)+'sec')
+#    print('Execution time: ' + str(time.time() - start_time) + ' sec')
     
     return topk_regions, updates
