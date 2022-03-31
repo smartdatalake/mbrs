@@ -8,7 +8,10 @@ This software supports mixture-based best region search for _arbitrarily shaped 
 
 This software can be used for discovery of top-k mixture-based regions over a collection of geolocated entities characterized by various categories, like Points of Interest (shops, restaurants, museums, etc.), or locations of various crime incidents, or check-ins at different types of venues, etc. We also provide a graphical interface that enables users to specify their preferences and provides map-based visualizations that highlight latent information in the data.
 
-Full details about the problem setting and the proposed algorithms are available in this [paper](https://doi.org/10.1145/3474717.3484215): D. Skoutas, D. Sacharidis, and K. Patroumpas. Discovering Mixture-Based Best Regions of Arbitrary Shapes. In Proceedings of the 29th International Conference on Advances in Geographic Information Systems ([ACM SIGSPATIAL 2021](https://sigspatial2021.sigspatial.org/)), Beijing, China, November 2021.
+Full details about the problem setting and the proposed algorithms are available in this paper: D. Skoutas, D. Sacharidis, and K. Patroumpas. [Discovering Mixture-Based Best Regions of Arbitrary Shapes](https://doi.org/10.1145/3474717.3484215). In Proceedings of the 29th International Conference on Advances in Geographic Information Systems ([ACM SIGSPATIAL 2021](https://sigspatial2021.sigspatial.org/)), Beijing, China, November 2021.
+
+More details about MAGE and its user interface are available in thie demo paper: K. Patroumpas, D. Skoutas, and D. Sacharidis. [MAGE: Discovering Mixture-based Areas of Interest over Geolocated Entities](https://openproceedings.org/2022/conf/edbt/paper-147.pdf). In Proceedings of the 25th International Conference on Extending Database Technology ([EDBT/ICDT 2022 Joint Conference](https://conferences.inf.ed.ac.uk/edbticdt2022/)), Edinburgh, Scotland, UK, March 2022.
+
 
 #### Source code
 
@@ -25,7 +28,13 @@ A Jupyter [notebook](notebooks/MixtureBestRegionSearch-NYC.ipynb) replicates the
 
 We demonstrate the entire framework with [MAGE](notebooks/MAGE-Demo-App.ipynb), a graphical user interface that exposes the full functionality and allows users to easily specify their preferences and inspect the returned top-k regions on map. Also built in Python and powered by [ipywidgets](https://github.com/jupyter-widgets/ipywidgets) for Jupyter notebooks, this interactive HTML page can be deployed using [Voila](https://voila.readthedocs.io/en/stable/using.html). This GUI is organized in three panels and offers the ability to load a dataset with geolocated entities, preprocess it, and discover mixture-based regions with user-specified parametrization.
 
-You may watch this short [video](https://drive.google.com/file/d/1-BwoBE1zrDvktTJIn2lcInTdDIZIO_WN/view) (5 minutes) that offers a quick tour of MAGE for discovering mixture-based areas of interest over Points of Interest (shops, restaurants, museums, etc.) in Athens [extracted in CSV format](http://download.slipo.eu/results/osm-to-csv/) from [OpenStreetMap](https://www.openstreetmap.org/).
+Please watch this short [video](https://drive.google.com/file/d/1-BwoBE1zrDvktTJIn2lcInTdDIZIO_WN/view) (5 minutes) that offers a quick tour of MAGE for discovering mixture-based areas of interest over Points of Interest (shops, restaurants, museums, etc.) in Athens [extracted in CSV format](http://download.slipo.eu/results/osm-to-csv/) from [OpenStreetMap](https://www.openstreetmap.org/).
+
+#### Presentations
+
+You may watch this [video presentation](https://www.youtube.com/watch?v=8EURgp9nJqc) (duration: 12 minutes) at SIGSPATIAL Conference 2021 regarding the proposed methodology and its evaluation over real-world datasets. 
+
+You may watch this [demonstration](https://www.youtube.com/watch?v=rjoCjMnvZ-4) (duration: 8 minutes) at EDBT Conference 2022 regarding MAGE and its application over different datasets.
 
 #### Acknowledgment
 
